@@ -1,0 +1,150 @@
+Region: eu-north-1
+Image:
+  Os: alinux2
+
+HeadNode:
+  InstanceType: t3.small
+  Networking:
+    SubnetId: subnet-006a7368f76fbc413
+    SecurityGroups:
+      - sg-08c20fe73a22a1290
+  Ssh:
+    KeyName: ersilia-key
+  LocalStorage:
+    RootVolume:
+      Size: 50
+      VolumeType: gp3
+  Iam:
+    AdditionalIamPolicies:
+      - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+      - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  CustomActions:
+    OnNodeConfigured:
+      Script: s3://ai2050-ersilia-cluster/scripts/bootstrap-head-simplified.sh
+
+Scheduling:
+  Scheduler: slurm
+  SlurmSettings:
+    ScaledownIdletime: 5
+  SlurmQueues:
+    # ========================================
+    # TEST QUEUE - Cheap instances for testing
+    # ========================================
+    - Name: test-queue
+      CapacityType: SPOT
+      AllocationStrategy: lowest-price
+      Networking:
+        SubnetIds:
+          - subnet-0157f3ce5e347347c
+        SecurityGroups:
+          - sg-01fecc8fbceb6701b
+        AssignPublicIp: false
+      ComputeResources:
+        # t3.medium: 2 vCPU, 4GB RAM, ~$0.012/hr spot (VERY CHEAP!)
+        - Name: test-t3-medium
+          InstanceType: t3.medium
+          MinCount: 0
+          MaxCount: 5
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 50  # Smaller disk for testing
+            VolumeType: gp3
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://ai2050-ersilia-cluster/scripts/bootstrap-compute.sh
+
+    # ========================================
+    # CPU QUEUE - Production workloads
+    # ========================================
+    - Name: cpu-queue
+      CapacityType: SPOT
+      AllocationStrategy: lowest-price
+      Networking:
+        SubnetIds:
+          - subnet-0157f3ce5e347347c
+        SecurityGroups:
+          - sg-01fecc8fbceb6701b
+        AssignPublicIp: false
+      ComputeResources:
+        # c6i.8xlarge: 32 vCPU, 64GB RAM, ~$0.26/hr spot (50% cheaper!)
+        - Name: cpu-c6i-8xl
+          InstanceType: c6i.8xlarge
+          MinCount: 0
+          MaxCount: 20
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 100
+            VolumeType: gp3
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://ai2050-ersilia-cluster/scripts/bootstrap-compute.sh
+
+    # ========================================
+    # GPU QUEUE - GPU workloads
+    # ========================================
+    - Name: gpu-queue
+      CapacityType: SPOT
+      AllocationStrategy: lowest-price
+      Networking:
+        SubnetIds:
+          - subnet-0157f3ce5e347347c
+        SecurityGroups:
+          - sg-01fecc8fbceb6701b
+        AssignPublicIp: false
+        PlacementGroup:
+          Enabled: false
+      ComputeResources:
+        # g5.4xlarge: 1x A10G GPU, ~$0.43/hr spot
+        - Name: gpu-g5-4xl
+          InstanceType: g5.4xlarge
+          MinCount: 0
+          MaxCount: 10
+      ComputeSettings:
+        LocalStorage:
+          RootVolume:
+            Size: 200
+            VolumeType: gp3
+      Iam:
+        AdditionalIamPolicies:
+          - Policy: arn:aws:iam::aws:policy/AmazonS3FullAccess
+      CustomActions:
+        OnNodeConfigured:
+          Script: s3://ai2050-ersilia-cluster/scripts/bootstrap-compute.sh
+
+SharedStorage:
+  # EFS - For ersilia-apptainer package and scripts
+  - MountDir: /shared
+    Name: shared-efs
+    StorageType: Efs
+    EfsSettings:
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+  
+  # FSx Lustre - For .sif files and data
+  - MountDir: /fsx
+    Name: fsx-models
+    StorageType: FsxLustre
+    FsxLustreSettings:
+      StorageCapacity: 1200
+      DeploymentType: SCRATCH_2
+      DataCompressionType: LZ4
+      ImportPath: s3://ai2050-ersilia-cluster/input
+      ExportPath: s3://ai2050-ersilia-cluster/output
+      AutoImportPolicy: NEW_CHANGED
+
+Tags:
+  - Key: Project
+    Value: AI2050
+  - Key: CostCenter
+    Value: Research
+  - Key: Environment
+    Value: Development

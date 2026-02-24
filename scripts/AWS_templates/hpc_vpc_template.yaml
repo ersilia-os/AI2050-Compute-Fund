@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC for AWS ParallelCluster - Cost Optimized (No NAT Gateway)'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcCidr
+          - PublicSubnetCidr
+          - PrivateSubnetCidr
+          - AvailabilityZone
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.3.0.0/16
+    Description: CIDR block for VPC
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+  
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.3.0.0/24
+    Description: CIDR block for Public Subnet (Head Node)
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+  
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.3.1.0/24
+    Description: CIDR block for Private Subnet (Compute Nodes)
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(1[6-9]|2[0-8]))$
+  
+  AvailabilityZone:
+    Type: String
+    Default: eu-north-1a
+    Description: Availability Zone for subnets
+    AllowedValues:
+      - eu-north-1a
+      - eu-north-1b
+      - eu-north-1c
+
+Resources:
+  # ==========================================
+  # VPC
+  # ==========================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+        - Key: Project
+          Value: AI2050
+        - Key: Purpose
+          Value: ParallelCluster
+
+  # ==========================================
+  # Internet Gateway
+  # ==========================================
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+        - Key: Project
+          Value: AI2050
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ==========================================
+  # Public Subnet (Head Node)
+  # ==========================================
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Public-Subnet'
+        - Key: Type
+          Value: Public
+        - Key: Purpose
+          Value: HeadNode
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Public-RT'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==========================================
+  # Private Subnet (Compute Nodes - No NAT)
+  # ==========================================
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Private-Subnet'
+        - Key: Type
+          Value: Private
+        - Key: Purpose
+          Value: ComputeNodes
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Private-RT'
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==========================================
+  # S3 Gateway Endpoint (FREE - No NAT costs!)
+  # ==========================================
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  # ==========================================
+  # Security Groups
+  # ==========================================
+  
+  # Head Node Security Group
+  HeadNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-HeadNode-SG'
+      GroupDescription: Security group for ParallelCluster head node
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # SSH from anywhere (restrict this to your IP in production!)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH access
+        # All traffic from VPC (for Slurm communication)
+        - IpProtocol: -1
+          CidrIp: !Ref VpcCidr
+          Description: Internal VPC traffic
+      SecurityGroupEgress:
+        # Allow all outbound (needs to reach GitHub, PyPI, etc.)
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-HeadNode-SG'
+        - Key: Project
+          Value: AI2050
+
+  # Compute Node Security Group
+  ComputeNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-ComputeNode-SG'
+      GroupDescription: Security group for ParallelCluster compute nodes
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # All traffic from VPC (for Slurm, NFS, etc.)
+        - IpProtocol: -1
+          CidrIp: !Ref VpcCidr
+          Description: Internal VPC traffic
+      SecurityGroupEgress:
+        # Limited egress - only to VPC and S3 endpoint
+        - IpProtocol: -1
+          CidrIp: !Ref VpcCidr
+          Description: VPC internal traffic
+        # Note: S3 access via Gateway Endpoint (no internet needed)
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ComputeNode-SG'
+        - Key: Project
+          Value: AI2050
+
+  # Allow compute nodes to reach S3 endpoint
+  # (Gateway endpoint uses prefix lists, but we ensure SG allows it)
+  ComputeNodeS3Access:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ComputeNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      # This is the specific Prefix List ID for S3 in eu-north-1 (Stockholm)
+      DestinationPrefixListId: pl-c3aa4faa
+      Description: HTTPS to S3 via Gateway Endpoint in eu-north-1
+
+# ==========================================
+# Outputs
+# ==========================================
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  VpcCidr:
+    Description: VPC CIDR Block
+    Value: !Ref VpcCidr
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcCidr'
+
+  PublicSubnetId:
+    Description: Public Subnet ID (for Head Node)
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetId'
+
+  PrivateSubnetId:
+    Description: Private Subnet ID (for Compute Nodes)
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetId'
+
+  HeadNodeSecurityGroupId:
+    Description: Security Group ID for Head Node
+    Value: !Ref HeadNodeSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-HeadNodeSG'
+
+  ComputeNodeSecurityGroupId:
+    Description: Security Group ID for Compute Nodes
+    Value: !Ref ComputeNodeSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ComputeNodeSG'
+
+  S3EndpointId:
+    Description: S3 Gateway Endpoint ID
+    Value: !Ref S3GatewayEndpoint
+
+  AvailabilityZone:
+    Description: Availability Zone
+    Value: !Ref AvailabilityZone
+
+  StackInfo:
+    Description: Quick reference info
+    Value: !Sub |
+      VPC: ${VPC}
+      Public Subnet: ${PublicSubnet} (${PublicSubnetCidr})
+      Private Subnet: ${PrivateSubnet} (${PrivateSubnetCidr})
+      Head Node SG: ${HeadNodeSecurityGroup}
+      Compute SG: ${ComputeNodeSecurityGroup}
