@@ -1,99 +1,104 @@
-# Ersilia's analysis template
+# AI2050 Compute Fund
 
-This repository provides a structured template for setting up new research analysis in Ersilia.
+This repository contains workflows and infrastructure templates for large-scale chemical library processing with Ersilia models on AWS ParallelCluster.
 
-## Background
+It currently covers two main areas:
 
-Replace this paragraph with a short description of the project. This description should explain the background or context of the project, specifying collaborators.
+1. Chemical library preprocessing into model-ready SMILES chunks.
+2. AWS ParallelCluster templates and operational guides for batch inference at scale.
 
-## Tracking details
+## Repository Contents
 
-The project is is tracked in [GitHub](https://github.com/ersilia-os/) (mainly for code) and [EOSVC](https://github.com/ersilia-os/eosvc) (mainly for data):
-
-* Tracked by Git and linked to a Github repository: only src, scripts and notebooks.
-* Tracked by DVC and linked to a public or private S3 bucket.
-
-## Repository structure
-
-This repository is organized as follows:
-
-```
-eos-analysis-template/
-│
-├── LICENSE
-├── README.md
-├── .gitignore
-├── install.sh
-├── requirements.txt
-│
-├── data/
-│   ├── raw/
-│   └── processed/
-│
+```text
+AI2050-Compute-Fund/
 ├── scripts/
-├── notebooks/
+│   ├── 01_chemical_libraries_processing.py
+│   ├── CHEMICAL_LIRARIES.md
+│   └── AWS_templates/
+│       ├── hpc_vpc_template.yaml
+│       ├── cluster-config.yaml
+│       ├── bootstrap-head-simplified.sh
+│       ├── bootstrap-compute-simplified.sh
+│       ├── PRE_DEPLOYMENT_CHECKLIST.md
+│       ├── CLUSTER_DETAILS.md
+│       └── CLUSTER_USAGE_HOWTO.md
 ├── assets/
-├── output/
-│   ├── results/
-│   └── plots/
-│
-├── src/
-├── tools/
-├── docs/
-├── tmp/
-│
-└── .git/
+├── README.md
+└── LICENSE
 ```
 
-- **data/**
-  - **raw/** → Original, untouched datasets  
-  - **processed/** → Cleaned and transformed datasets  
+## Chemical Library Processing
 
-- **scripts/** → Standalone scripts for preprocessing or automation  
+The script [`scripts/01_chemical_libraries_processing.py`](scripts/01_chemical_libraries_processing.py) extracts SMILES and compound IDs from supported public datasets and writes:
 
-- **notebooks/** → Jupyter notebooks for exploration and prototyping  
+1. Chunked CSV files with one `smiles` column (10,000 rows per chunk).
+2. A full `<library_name>_smiles_ids.csv` file with `smiles` and `collection_id`.
 
-- **assets/** → Images, figures, and other static resources  
+### Supported input files
 
-- **output/**
-  - **results/** → Numerical results, logs, or text outputs  
-  - **plots/** → Visualizations and charts  
+- `Enamine_Hit_Locator_Library_plated.zip`
+- `Enamine_Liquid-Stock-Collection-US.zip`
+- `Molport_Screening_Compound_Database.zip`
+- `coconut_csv-02-2026.zip`
+- `2025.02_Enamine_REAL_DB_10.4M.cxsmiles.bz2`
 
-- **src/** → Core source code and reusable modules  
-
-- **tools/** → Helper utilities and development tools  
-
-- **docs/** → Project documentation and reports  
-
-- **tmp/** → Temporary files or intermediate outputs  
-
-- **.git/** → Git metadata (version control)  
-
----
-
-📌 Empty folders are preserved with `.gitkeep` files so the structure remains consistent in Git.
-
----
-
-## Project motivation and goal
-
-Write a brief description about the scientific motivation and goal of the project. 
-
-## 🚀 Getting Started
-
-**Clone this repository**  
+### Usage
 
 ```bash
-git clone <your-repo-url>
-cd eos-analysis-template
+# Process all configured libraries from a directory
+python scripts/01_chemical_libraries_processing.py \
+  --input-dir ./raw \
+  --output-dir ./output
+
+# Process selected files only
+python scripts/01_chemical_libraries_processing.py \
+  --input-dir ./raw \
+  --output-dir ./output \
+  --files coconut_csv-02-2026.zip Enamine_Hit_Locator_Library_plated.zip
 ```
 
-## Using this repository
+### Output layout
 
-This repository may contain data and outputs that are not stored in GitHub. You can use [eosvc](https://github.com/ersilia-os/eosvc) to download these files or, otherwise, simply download them and place them in the current folder following [this link](https://example.com).
+```text
+output/
+└── <library_name>/
+    ├── <library_name>_chunk_000.csv
+    ├── <library_name>_chunk_001.csv
+    ├── ...
+    └── <library_name>_smiles_ids.csv
+```
 
-## About the Ersilia Open Source Initiative
+More details: [`scripts/CHEMICAL_LIRARIES.md`](scripts/CHEMICAL_LIRARIES.md)
 
-The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery.
+## AWS ParallelCluster Templates
+
+Cluster infrastructure and operating docs are under [`scripts/AWS_templates/`](scripts/AWS_templates/).
+
+### Key files
+
+- VPC stack template: `hpc_vpc_template.yaml`
+- Cluster config: `cluster-config.yaml`
+- Bootstrap scripts: `bootstrap-head-simplified.sh`, `bootstrap-compute-simplified.sh`
+- Deployment checklist: `PRE_DEPLOYMENT_CHECKLIST.md`
+- Operations guides: `CLUSTER_DETAILS.md`, `CLUSTER_USAGE_HOWTO.md`
+
+### Typical flow
+
+1. Validate prerequisites with `PRE_DEPLOYMENT_CHECKLIST.md`.
+2. Provision networking (VPC/subnets/endpoints/security groups).
+3. Deploy ParallelCluster with `cluster-config.yaml`.
+4. Upload SIF models and input chunks to S3.
+5. Submit jobs from the head node and monitor with Slurm.
+6. Merge outputs and sync results back from S3.
+
+## Notes
+
+- `requirements.txt` is currently empty because the chemical processing script uses Python standard library modules only.
+- `install.sh` is currently empty.
+- Some docs include environment-specific IDs (VPC/subnet/security group, bucket names). Update them before reuse.
+
+## About Ersilia
+
+The [Ersilia Open Source Initiative](https://ersilia.io) builds open tools for AI-enabled drug discovery, with a focus on enabling research in low-resource settings.
 
 ![Ersilia Logo](assets/Ersilia_Brand.png)
