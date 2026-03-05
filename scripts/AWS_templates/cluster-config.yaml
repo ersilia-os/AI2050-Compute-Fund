@@ -62,7 +62,7 @@ Scheduling:
     # ========================================
     - Name: cpu-queue
       CapacityType: SPOT
-      AllocationStrategy: lowest-price
+      AllocationStrategy: capacity-optimized
       Networking:
         SubnetIds:
           - subnet-0157f3ce5e347347c
@@ -70,9 +70,14 @@ Scheduling:
           - sg-01fecc8fbceb6701b
         AssignPublicIp: false
       ComputeResources:
-        # c6i.8xlarge: 32 vCPU, 64GB RAM, ~$0.26/hr spot (50% cheaper!)
+        # Multiple instance types for Spot resilience (32 vCPU / 64GB class)
+        # ParallelCluster will use whichever has available Spot capacity
         - Name: cpu-c6i-8xl
-          InstanceType: c6i.8xlarge
+          Instances:
+            - InstanceType: c6i.8xlarge   # Intel, 32 vCPU, 64GB
+            - InstanceType: c7i.8xlarge   # Intel, 32 vCPU, 64GB (newer)
+            - InstanceType: c5a.8xlarge   # AMD,   32 vCPU, 64GB
+            - InstanceType: m6i.8xlarge   # Intel, 32 vCPU, 128GB (fallback)
           MinCount: 0
           MaxCount: 20
       ComputeSettings:

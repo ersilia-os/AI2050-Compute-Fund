@@ -55,6 +55,11 @@ chmod 755 /shared/data
 chmod 755 /shared/logs
 chmod 755 /shared/output
 
+chown -R ec2-user:ec2-user /shared/sif-files
+chown -R ec2-user:ec2-user /shared/scripts
+chown -R ec2-user:ec2-user /shared/logs
+chown -R ec2-user:ec2-user /shared/output
+
 # ==========================================
 # Create helper scripts
 # ==========================================
@@ -157,30 +162,44 @@ TEST_SCRIPT
 
 chmod +x /shared/scripts/test-cluster.sh
 
-# Script 4: Run Ersilia job (simple sbatch format)
+# Script 4: Run Ersilia job (supports both single and array job modes)
 cat > /shared/scripts/run-ersilia-job.sh << 'RUN_SCRIPT'
 #!/bin/bash
 #SBATCH --job-name=ersilia
 #SBATCH --partition=cpu-queue
 #SBATCH --nodes=1
+#SBATCH --cpus-per-task=2
 #SBATCH --time=02:00:00
-#SBATCH --output=/shared/logs/ersilia-%j.out
-#SBATCH --error=/shared/logs/ersilia-%j.err
+#SBATCH --output=/shared/logs/ersilia-%A_%a.out
+#SBATCH --error=/shared/logs/ersilia-%A_%a.err
 
 # Process a single chunk file with an Ersilia model
-# Usage: sbatch run-ersilia-job.sh <model_id> <input_file> <output_file>
 #
-# Example:
-#   sbatch run-ersilia-job.sh eos2r5a /fsx/input/library_001/chunk_0001.csv /fsx/output/library_001/eos2r5a/eos2r5a_results_0001.csv
+# Array job mode (used by submit-ersilia-batch.sh):
+#   sbatch --array=0-N run-ersilia-job.sh <model_id> <chunk_list_file> <output_dir>
+#
+# Single job mode:
+#   sbatch run-ersilia-job.sh <model_id> <input_file> <output_file>
 
 MODEL_ID=$1
-INPUT_FILE=$2
-OUTPUT_FILE=$3
+
+if [ -n "$SLURM_ARRAY_TASK_ID" ]; then
+    # Array job: pick chunk by task index
+    CHUNK_LIST=$2
+    OUTPUT_BASE=$3
+    INPUT_FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID+1))p" "$CHUNK_LIST")
+    CHUNK_NUM=$(basename "$INPUT_FILE" .csv | grep -oP '\d+$')
+    OUTPUT_FILE="${OUTPUT_BASE}/${MODEL_ID}_results_${CHUNK_NUM}.csv"
+else
+    # Single job: paths passed directly
+    INPUT_FILE=$2
+    OUTPUT_FILE=$3
+fi
 
 echo "=========================================="
 echo "Ersilia Job"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
+echo "Job ID: $SLURM_JOB_ID  Array task: ${SLURM_ARRAY_TASK_ID:-N/A}"
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 echo "Model: $MODEL_ID"
@@ -206,23 +225,28 @@ fi
 OUTPUT_DIR=$(dirname "$OUTPUT_FILE")
 mkdir -p "$OUTPUT_DIR"
 
+# Copy input to local /tmp to avoid FSx Lustre visibility issues in post-processing
+LOCAL_INPUT="/tmp/$(basename $INPUT_FILE)"
+cp "$INPUT_FILE" "$LOCAL_INPUT"
+
 # Run ersilia-apptainer
 echo "Starting ersilia-apptainer..."
-echo "Processing $(wc -l < $INPUT_FILE) molecules..."
+echo "Processing $(wc -l < $LOCAL_INPUT) molecules..."
 
-python3 -m ersilia_apptainer \
+/shared/python39/bin/ersilia_apptainer \
     --sif "$SIF_FILE" \
-    --input "$INPUT_FILE" \
-    --output "$OUTPUT_FILE"
+    --input "$LOCAL_INPUT" \
+    --output "$OUTPUT_FILE" --verbose
+
+rm -f "$LOCAL_INPUT"
 
 # Check if output was created
 if [ -f "$OUTPUT_FILE" ]; then
     echo "✓ Success! Output: $OUTPUT_FILE"
     echo "Output size: $(wc -l < $OUTPUT_FILE) lines"
-    
+
     # Upload to S3 if S3_BUCKET is set (preserve directory structure)
     if [ -n "$S3_BUCKET" ]; then
-        # Extract path relative to /fsx/output/
         RELATIVE_PATH=$(echo "$OUTPUT_FILE" | sed 's|^/fsx/output/||')
         S3_OUTPUT="s3://$S3_BUCKET/output/$RELATIVE_PATH"
         aws s3 cp "$OUTPUT_FILE" "$S3_OUTPUT"
@@ -306,18 +330,18 @@ fi
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Find all chunk files
-CHUNK_FILES=($INPUT_DIR/chunk_*.csv)
+# Find all chunk files (matches both chunk_0001.csv and Library_chunk_000.csv)
+CHUNK_FILES=($(ls "$INPUT_DIR"/*.csv 2>/dev/null | grep '_chunk_'))
 NUM_CHUNKS=${#CHUNK_FILES[@]}
 
 if [ $NUM_CHUNKS -eq 0 ]; then
     echo "ERROR: No chunk files found in $INPUT_DIR"
-    echo "Expected files: chunk_0001.csv, chunk_0002.csv, ..."
+    echo "Expected files containing '_chunk_': chunk_0001.csv or LibraryName_chunk_000.csv"
     exit 1
 fi
 
 echo "=========================================="
-echo "Ersilia Batch Job Submission"
+echo "Ersilia Batch Job Submission (Array)"
 echo "=========================================="
 echo "Model: $MODEL_ID"
 echo "Library: $LIBRARY_NAME"
@@ -327,37 +351,49 @@ echo "Number of chunks: $NUM_CHUNKS"
 echo "Queue: $QUEUE"
 echo ""
 
-# Submit jobs
-echo "Submitting jobs to Slurm..."
-SUBMITTED=0
-FAILED=0
+# Write chunk list file (one path per line, used by array job tasks)
+CHUNK_LIST="${OUTPUT_DIR}/chunk_list.txt"
+printf '%s\n' "${CHUNK_FILES[@]}" > "$CHUNK_LIST"
+echo "Chunk list written: $CHUNK_LIST"
 
-for chunk_file in "${CHUNK_FILES[@]}"; do
-    if [ -f "$chunk_file" ]; then
-        # Extract chunk number from filename (e.g., chunk_0001.csv -> 0001)
-        CHUNK_BASE=$(basename "$chunk_file" .csv)
-        CHUNK_NUM=$(echo "$CHUNK_BASE" | grep -oP '\d+$')
-        
-        # Create output filename: eos2r5a_results_0001.csv
-        OUTPUT_FILE="${OUTPUT_DIR}/${MODEL_ID}_results_${CHUNK_NUM}.csv"
-        
-        # Submit job (override partition from batch script argument)
-        JOB_ID=$(sbatch \
-            --partition="$QUEUE" \
-            /shared/scripts/run-ersilia-job.sh \
-            "$MODEL_ID" \
-            "$chunk_file" \
-            "$OUTPUT_FILE" \
-            2>&1 | grep -oP 'Submitted batch job \K\d+')
-        
-        if [ -n "$JOB_ID" ]; then
-            echo "  ✓ Submitted chunk_${CHUNK_NUM} (Job ID: $JOB_ID)"
-            SUBMITTED=$((SUBMITTED + 1))
-        else
-            echo "  ✗ Failed to submit chunk_${CHUNK_NUM}"
-            FAILED=$((FAILED + 1))
-        fi
+# Submit as Slurm array job(s)
+# Slurm's MaxArraySize=1000 limits both count and max index to 999.
+# For larger libraries, split into multiple chunk list files and submit each as 0-N.
+MAX_ARRAY_SIZE=1000
+ARRAY_IDS=()
+BATCH=0
+START=0
+
+while [ $START -lt $NUM_CHUNKS ]; do
+    END=$(( START + MAX_ARRAY_SIZE - 1 ))
+    if [ $END -ge $NUM_CHUNKS ]; then
+        END=$(( NUM_CHUNKS - 1 ))
     fi
+    BATCH_SIZE=$(( END - START + 1 ))
+
+    # Write a sub-list for this batch (indices will be 0 to BATCH_SIZE-1)
+    BATCH_LIST="${OUTPUT_DIR}/chunk_list_batch${BATCH}.txt"
+    sed -n "$((START+1)),$((END+1))p" "$CHUNK_LIST" > "$BATCH_LIST"
+
+    ARRAY_ID=$(sbatch \
+        --partition="$QUEUE" \
+        --array=0-$((BATCH_SIZE-1)) \
+        /shared/scripts/run-ersilia-job.sh \
+        "$MODEL_ID" \
+        "$BATCH_LIST" \
+        "$OUTPUT_DIR" \
+        2>&1 | grep -oP 'Submitted batch job \K\d+')
+
+    if [ -n "$ARRAY_ID" ]; then
+        ARRAY_IDS+=("$ARRAY_ID")
+        echo "Submitted array job $ARRAY_ID (chunks ${START}-${END}, batch list: $BATCH_LIST)"
+    else
+        echo "ERROR: Array job submission failed for chunks ${START}-${END}"
+        exit 1
+    fi
+
+    START=$(( END + 1 ))
+    BATCH=$(( BATCH + 1 ))
 done
 
 echo ""
@@ -367,14 +403,17 @@ echo "=========================================="
 echo "Library: $LIBRARY_NAME"
 echo "Model: $MODEL_ID"
 echo "Total chunks: $NUM_CHUNKS"
-echo "Jobs submitted: $SUBMITTED"
-echo "Jobs failed: $FAILED"
-echo ""
-echo "Output directory: $OUTPUT_DIR"
+echo "Array Job IDs: ${ARRAY_IDS[*]}"
 echo ""
 echo "Monitor jobs:"
 echo "  squeue -u \$USER"
 echo "  watch -n 5 'squeue -u \$USER'"
+echo ""
+echo "Cancel entire library:"
+for ID in "${ARRAY_IDS[@]}"; do
+    echo "  scancel $ID"
+done
+
 echo ""
 echo "When complete, merge results:"
 echo "  /shared/scripts/merge-results.sh $OUTPUT_DIR ${OUTPUT_DIR}/../${MODEL_ID}_final.csv"
@@ -393,8 +432,8 @@ Output Directory: $OUTPUT_DIR
 Number of Chunks: $NUM_CHUNKS
 Queue: $QUEUE
 Submitted: $(date)
-Jobs Submitted: $SUBMITTED
-Jobs Failed: $FAILED
+Array Job ID: $ARRAY_ID
+Chunk List: $CHUNK_LIST
 EOF
 
 echo "Job info saved: $JOB_INFO_FILE"

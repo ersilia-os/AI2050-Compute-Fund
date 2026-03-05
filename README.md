@@ -19,6 +19,7 @@ AI2050-Compute-Fund/
 │       ├── cluster-config.yaml
 │       ├── bootstrap-head-simplified.sh
 │       ├── bootstrap-compute-simplified.sh
+│       ├── check-results.sh
 │       ├── PRE_DEPLOYMENT_CHECKLIST.md
 │       ├── CLUSTER_DETAILS.md
 │       └── CLUSTER_USAGE_HOWTO.md
@@ -79,6 +80,7 @@ Cluster infrastructure and operating docs are under [`scripts/AWS_templates/`](s
 - VPC stack template: `hpc_vpc_template.yaml`
 - Cluster config: `cluster-config.yaml`
 - Bootstrap scripts: `bootstrap-head-simplified.sh`, `bootstrap-compute-simplified.sh`
+- Results validation: `check-results.sh`
 - Deployment checklist: `PRE_DEPLOYMENT_CHECKLIST.md`
 - Operations guides: `CLUSTER_DETAILS.md`, `CLUSTER_USAGE_HOWTO.md`
 

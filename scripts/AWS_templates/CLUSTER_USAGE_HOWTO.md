@@ -96,7 +96,28 @@ sacct -u $USER --format=JobID,JobName,State,Elapsed
 cat  /shared/logs/ersilia-JOBID.out
 ```
 
-### **Step 4: Merge Results**
+### **Step 4: Validate Results**
+
+```bash
+# Check that all chunks have matching output row counts
+# (run this on the head node — script is in /shared/scripts/ on the cluster)
+/shared/scripts/check-results.sh <library_name> <model_id>
+
+# Example
+/shared/scripts/check-results.sh Enamine_Hit_Locator_460K eos4k4f_v1
+```
+
+This prints a table showing OK / MISSING / MISMATCH per chunk, plus totals. Resubmit any missing chunks individually:
+
+```bash
+sbatch --partition=cpu-queue \
+  /shared/scripts/run-ersilia-job.sh \
+  <model_id> \
+  /fsx/input/<library_name>/<library_name>_chunk_007.csv \
+  /fsx/output/<library_name>/<model_id>/<model_id>_results_007.csv
+```
+
+### **Step 5: Merge Results**
 
 ```bash
 # After all jobs complete, merge chunk results
@@ -107,7 +128,7 @@ cat  /shared/logs/ersilia-JOBID.out
 # Results automatically uploaded to S3
 ```
 
-### **Step 5: Download Results (Local Computer)**
+### **Step 6: Download Results (Local Computer)**
 
 ```bash
 # Download final merged file
@@ -178,12 +199,12 @@ watch -n 5 'squeue -u $USER | head -20'
 
 ### **File Naming Conventions**
 
-**Input chunks:**
-- Format: `chunk_0001.csv`, `chunk_0002.csv`, ...
+**Input chunks** (produced by `01_chemical_libraries_processing.py`):
+- Format: `<library_name>_chunk_000.csv`, `<library_name>_chunk_001.csv`, ...
 - Location: `/fsx/input/<library_name>/`
 
 **Output results:**
-- Format: `<model_id>_results_0001.csv`, `<model_id>_results_0002.csv`, ...
+- Format: `<model_id>_results_000.csv`, `<model_id>_results_001.csv`, ...
 - Location: `/fsx/output/<library_name>/<model_id>/`
 
 **Final merged:**
@@ -200,6 +221,72 @@ watch -n 5 'squeue -u $USER | head -20'
 ---
 
 ## 🔍 Troubleshooting
+
+### **Spot Capacity Unavailable (InsufficientInstanceCapacity)**
+
+When AWS has no Spot capacity for the requested instance type, nodes go `down#` and jobs stay pending with `(Nodes required for job are DOWN, DRAINED or reserved)`.
+
+**Check if this is the cause:**
+```bash
+sudo /opt/slurm/bin/scontrol show node cpu-queue-dy-cpu-c6i-8xl-1 | grep Reason
+# Shows: (Code:InsufficientInstanceCapacity)Failure when resuming nodes
+```
+
+**Fix — reset nodes and resubmit:**
+```bash
+# Cancel stuck jobs
+scancel <JOBID>
+
+# Reset node state
+sudo /opt/slurm/bin/scontrol update nodename=cpu-queue-dy-cpu-c6i-8xl-[1-20] state=down reason="resetting"
+sudo /opt/slurm/bin/scontrol update nodename=cpu-queue-dy-cpu-c6i-8xl-[1-20] state=resume
+
+# Resubmit
+/shared/scripts/submit-ersilia-batch.sh <model_id> <library_name> cpu-queue
+```
+
+The cpu-queue is configured with 4 instance types (`c6i.8xlarge`, `c7i.8xlarge`, `c5a.8xlarge`, `m6i.8xlarge`) and `capacity-optimized` strategy, so AWS will pick whichever has available Spot capacity.
+
+**Monitor the resume log to confirm a node launches:**
+```bash
+sudo tail -f /var/log/parallelcluster/slurm_resume.log
+```
+
+---
+
+### **Cluster Config Update (e.g. adding instance types)**
+
+If you need to update the cluster configuration (from your local machine):
+
+```bash
+# Stop the compute fleet first
+pcluster update-compute-fleet \
+  --cluster-name ai2050-cluster \
+  --status STOP_REQUESTED \
+  --region eu-north-1
+
+# Wait for STOPPED status
+pcluster describe-compute-fleet --cluster-name ai2050-cluster --region eu-north-1
+
+# Apply config update
+pcluster update-cluster \
+  --cluster-name ai2050-cluster \
+  --cluster-configuration scripts/AWS_templates/cluster-config.yaml \
+  --region eu-north-1
+
+# Wait for UPDATE_COMPLETE
+pcluster describe-cluster --cluster-name ai2050-cluster --region eu-north-1 --query 'clusterStatus'
+
+# Restart compute fleet
+pcluster update-compute-fleet \
+  --cluster-name ai2050-cluster \
+  --status START_REQUESTED \
+  --region eu-north-1
+```
+
+> Note: Networking, storage (EFS/FSx), and head node instance type cannot be changed via update — they require cluster deletion.
+
+---
 
 ### **Compute Nodes Not Starting**
 

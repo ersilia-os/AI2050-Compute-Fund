@@ -46,11 +46,13 @@ s3://ai2050-ersilia-cluster/
 
 ## 📋 Available Queues
 
-| Queue | Instance Type | vCPUs | RAM | Max Nodes | Cost/hr (Spot) | Use Case |
+| Queue | Instance Types | vCPUs | RAM | Max Nodes | Cost/hr (Spot) | Use Case |
 |-------|---------------|-------|-----|-----------|----------------|----------|
 | **test-queue** | t3.medium | 2 | 4GB | 5 | ~$0.012 | Testing small chunks |
-| **cpu-queue** | c6i.8xlarge | 32 | 64GB | 20 | ~$0.26 | Production processing |
+| **cpu-queue** | c6i.8xlarge, c7i.8xlarge, c5a.8xlarge, m6i.8xlarge | 32 | 64-128GB | 20 | ~$0.26 | Production processing |
 | **gpu-queue** | g5.4xlarge | 16 | 64GB | 10 | ~$0.43 | GPU models |
+
+> **cpu-queue uses multiple instance types** with `capacity-optimized` allocation strategy. AWS automatically picks whichever has available Spot capacity, avoiding `InsufficientInstanceCapacity` errors.
 
 ---
 
@@ -64,10 +66,11 @@ All scripts located in ` /shared/scripts/`
 - `upload-sif-to-s3.sh` - Upload SIF file(s) to S3
 
 ### **Job Processing**
-- `submit-ersilia-batch.sh` - Submit parallel jobs for a library ⭐
-- `run-ersilia-job.sh` - Process one chunk (called automatically)
+- `submit-ersilia-batch.sh` - Submit parallel Slurm array job for a library ⭐
+- `run-ersilia-job.sh` - Process one chunk (called automatically by array job)
+- `check-results.sh` - Compare input vs output row counts per chunk ⭐
 - `merge-results.sh` - Merge chunked results into single file
-- `test-run-ersilia-job.sh` - Uses the test queue to run a test job 
+- `test-run-ersilia-job.sh` - Uses the test queue to run a test job
 
 ### **Cluster Management**
 - `test-cluster.sh` - Validate cluster setup
@@ -224,7 +227,7 @@ cat  /shared/logs/ersilia-<JOBID>.out
 
 ---
 
-**Last Updated:** February 23, 2026  
-**Cluster Version:** aws-parallelcluster-3.14.1  
-**Python:** 3.9.18  
+**Last Updated:** March 5, 2026
+**Cluster Version:** aws-parallelcluster-3.14.1
+**Python:** 3.9.18
 **Apptainer:** 1.2.5
