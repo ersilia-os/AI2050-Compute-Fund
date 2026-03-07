@@ -1,80 +1,122 @@
 #!/bin/bash
-# Check input vs output line counts for a processed library
-# Usage: check-results.sh <library_name> <model_id>
+# Check input vs output line counts for all libraries for a given model
+# Reports missing chunks and chunks with fully-empty result rows
+# Usage: check-results.sh <model_id>
 #
 # Example:
-#   check-results.sh Enamine_Hit_Locator_460K eos4k4f_v1
+#   check-results.sh eos4k4f_v1
 
-LIBRARY_NAME=$1
-MODEL_ID=$2
+MODEL_ID=$1
 
-if [ -z "$LIBRARY_NAME" ] || [ -z "$MODEL_ID" ]; then
-    echo "Usage: $0 <library_name> <model_id>"
-    echo "Example: $0 Enamine_Hit_Locator_460K eos4k4f_v1"
+if [ -z "$MODEL_ID" ]; then
+    echo "Usage: $0 <model_id>"
+    echo "Example: $0 eos4k4f_v1"
     exit 1
 fi
 
-INPUT_DIR="/fsx/input/${LIBRARY_NAME}"
-OUTPUT_DIR="/fsx/output/${LIBRARY_NAME}/${MODEL_ID}"
-
-if [ ! -d "$INPUT_DIR" ]; then
-    echo "ERROR: Input directory not found: $INPUT_DIR"
-    exit 1
-fi
-
-if [ ! -d "$OUTPUT_DIR" ]; then
-    echo "ERROR: Output directory not found: $OUTPUT_DIR"
-    exit 1
-fi
+LIBRARIES=(
+    "Enamine_Hit_Locator_460K"
+    "Coconut_715K"
+    "Enamine_Liquid_Stock_2.5M"
+    "Molport_Screening_Compounds_5.3M"
+    "Enamine_Real_Sample_10.4M"
+)
 
 /shared/python39/bin/python3.9 << EOF
+import csv
 from pathlib import Path
 
-input_dir  = Path("${INPUT_DIR}")
-output_dir = Path("${OUTPUT_DIR}")
-model_id   = "${MODEL_ID}"
+csv.field_size_limit(10 * 1024 * 1024)
 
-input_chunks = sorted(input_dir.glob("*_chunk_*.csv"))
+INPUT_COLS = {"key", "input", "smiles", "canonical_smiles"}
 
-if not input_chunks:
-    print(f"ERROR: No chunk files found in {input_dir}")
-    exit(1)
+model_id  = "${MODEL_ID}"
+libraries = [$(printf '"%s",' "${LIBRARIES[@]}")]
 
-print(f"Library : ${LIBRARY_NAME}")
-print(f"Model   : {model_id}")
-print(f"Chunks  : {len(input_chunks)}")
+def check_chunk_empties(output_file, input_cols):
+    """Return count of rows where ALL result columns are empty."""
+    empty_rows = 0
+    result_cols = None
+    try:
+        with open(output_file, newline="") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames:
+                result_cols = [c for c in reader.fieldnames
+                               if c.strip().lower() not in input_cols]
+            for row in reader:
+                if result_cols and all(row.get(c, "").strip() == "" for c in result_cols):
+                    empty_rows += 1
+    except Exception as e:
+        print(f"    WARNING: could not read {output_file.name}: {e}")
+    return empty_rows
+
 print()
-print(f"{'Chunk':<10} {'Input rows':>12} {'Output rows':>13} {'Status':>10}")
-print("-" * 50)
+print(f"Model: {model_id}")
+print("=" * 75)
+print(f"{'Library':<45} {'Chunks':>7} {'Missing':>8} {'Empty rows':>11} {'Done':>7}")
+print("-" * 75)
 
-total_in = total_out = mismatches = missing = 0
+for library in libraries:
+    input_dir  = Path(f"/fsx/input/{library}")
+    output_dir = Path(f"/fsx/output/{library}/{model_id}")
 
-for input_file in input_chunks:
-    chunk_num = input_file.stem.split("_")[-1]
-    output_file = output_dir / f"{model_id}_results_{chunk_num}.csv"
+    if not input_dir.exists() or not output_dir.exists():
+        print(f"{library:<45} {'—':>7} {'—':>8} {'—':>11} {'NOT RUN':>7}")
+        continue
 
-    in_rows = sum(1 for _ in input_file.open()) - 1  # subtract header
+    input_chunks = sorted(input_dir.glob("*_chunk_*.csv"))
+    if not input_chunks:
+        print(f"{library:<45} {'—':>7} {'—':>8} {'—':>11} {'NO INPUT':>7}")
+        continue
 
-    if output_file.exists():
+    missing_chunks = []
+    mismatch_chunks = []
+    empty_chunks = []   # (chunk_num, empty_row_count)
+    done = 0
+
+    for input_file in input_chunks:
+        chunk_num   = input_file.stem.split("_")[-1]
+        output_file = output_dir / f"{model_id}_results_{chunk_num}.csv"
+
+        if not output_file.exists():
+            missing_chunks.append(chunk_num)
+            continue
+
+        in_rows  = sum(1 for _ in input_file.open()) - 1
         out_rows = sum(1 for _ in output_file.open()) - 1
-        if in_rows == out_rows:
-            status = "OK"
+
+        if in_rows != out_rows:
+            mismatch_chunks.append(chunk_num)
         else:
-            status = "MISMATCH"
-            mismatches += 1
-    else:
-        out_rows = 0
-        status = "MISSING"
-        missing += 1
+            done += 1
 
-    total_in  += in_rows
-    total_out += out_rows
-    print(f"{chunk_num:<10} {in_rows:>12,} {out_rows:>13,} {status:>10}")
+        empty_count = check_chunk_empties(output_file, INPUT_COLS)
+        if empty_count > 0:
+            empty_chunks.append((chunk_num, empty_count))
 
-print("-" * 50)
-print(f"{'TOTAL':<10} {total_in:>12,} {total_out:>13,}")
+    total      = len(input_chunks)
+    n_missing  = len(missing_chunks)
+    n_empty    = sum(c for _, c in empty_chunks)
+    status     = f"{done}/{total}"
+
+    print(f"{library:<45} {total:>7,} {n_missing:>8,} {n_empty:>11,} {status:>7}")
+
+    if missing_chunks:
+        chunks_str = ", ".join(missing_chunks[:20])
+        suffix = f" ... (+{len(missing_chunks)-20} more)" if len(missing_chunks) > 20 else ""
+        print(f"  MISSING chunks : {chunks_str}{suffix}")
+
+    if mismatch_chunks:
+        chunks_str = ", ".join(mismatch_chunks[:20])
+        suffix = f" ... (+{len(mismatch_chunks)-20} more)" if len(mismatch_chunks) > 20 else ""
+        print(f"  MISMATCH chunks: {chunks_str}{suffix}")
+
+    if empty_chunks:
+        top = empty_chunks[:10]
+        summary = ", ".join(f"{c}({n} rows)" for c, n in top)
+        suffix = f" ... (+{len(empty_chunks)-10} more chunks)" if len(empty_chunks) > 10 else ""
+        print(f"  EMPTY row chunks: {summary}{suffix}")
+
+print("=" * 75)
 print()
-print(f"Missing output files : {missing}")
-print(f"Mismatched row counts: {mismatches}")
-print(f"Completed            : {len(input_chunks) - missing - mismatches} / {len(input_chunks)}")
 EOF
